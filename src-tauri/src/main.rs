@@ -1,11 +1,13 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-use axum::{extract::Query, response::IntoResponse, routing::get, Extension, Router};
+mod database;
+mod graph;
+use axum::response::Html;
+use axum::{extract::Query, routing::get, Extension, Router};
 use oauth2::basic::BasicClient;
 use oauth2::{
-    reqwest::async_http_client, reqwest::Error, AuthUrl, AuthorizationCode, ClientId, CsrfToken,
-    HttpRequest, HttpResponse, PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenUrl,
+    reqwest::Error, AuthUrl, AuthorizationCode, ClientId, CsrfToken, HttpRequest, HttpResponse,
+    PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenUrl,
 };
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -20,20 +22,22 @@ struct AuthState {
 }
 
 #[tauri::command]
-async fn authenticate(handle: tauri::AppHandle) {
+async fn authenticate(handle: tauri::AppHandle) -> bool {
     let auth = handle.state::<AuthState>();
     let (auth_url, _) = auth
         .client
         .authorize_url(|| auth.csrf_token.clone())
         .add_scope(Scope::new("user.read".to_string()))
+        .add_scope(Scope::new("offline_access".to_string()))
         .set_pkce_challenge(auth.pkce.0.clone())
         .url();
-    tauri::async_runtime::spawn(async move { run_server(handle).await });
     println!("Opening {}", auth_url);
     open::that(auth_url.to_string()).unwrap();
+    println!("Done");
+    false
 }
 
-fn main() {
+fn main() -> surrealdb::Result<()> {
     let port = 9197;
     let (pkce_code_challenge, pkce_code_verifier) = PkceCodeChallenge::new_random_sha256();
     let socket_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port); // or any other port
@@ -51,8 +55,19 @@ fn main() {
     tauri::Builder::default()
         .manage(state)
         .invoke_handler(tauri::generate_handler![authenticate])
+        .setup(|app| {
+            let handle = app.handle();
+            tauri::async_runtime::spawn(async move {
+                let res = database::initialize_database(&handle).await;
+                println!("Database initialized successfully {}", res.is_ok());
+                tauri::async_runtime::spawn(async move { run_server(handle).await });
+            });
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    Ok(())
 }
 
 fn create_client(redirect_url: RedirectUrl) -> BasicClient {
@@ -75,12 +90,12 @@ struct CallbackQuery {
 async fn authorize(
     handle: Extension<tauri::AppHandle>,
     query: Query<CallbackQuery>,
-) -> impl IntoResponse {
+) -> Html<&'static str> {
     let auth = handle.state::<AuthState>();
 
     if query.state.secret() != auth.csrf_token.secret() {
         println!("Suspected Man in the Middle attack!");
-        return "authorized".to_string(); // never let them know your next move
+        return Html(include_str!("../error.html"));
     }
     let oauth_http_client = local_async_http_client;
     let token = auth
@@ -88,9 +103,21 @@ async fn authorize(
         .exchange_code(query.code.clone())
         .set_pkce_verifier(PkceCodeVerifier::new(auth.pkce.1.clone()))
         .request_async(oauth_http_client)
-        .await
-        .unwrap();
-    "authorized".to_string()
+        .await;
+
+    if let Err(e) = token {
+        println!("Failed to get token: {}", e);
+        return Html(include_str!("../error.html"));
+    }
+
+    let token = token.unwrap();
+
+    let client = graph::GraphClient::new(token.clone());
+    let user_details = client.get_user().await.unwrap();
+
+    let resp = database::save_token(token, user_details.user_principal_name).await;
+    println!("{:?}", resp);
+    Html(&include_str!("../redirect.html"))
 }
 
 async fn run_server(handle: tauri::AppHandle) -> Result<(), axum::Error> {
