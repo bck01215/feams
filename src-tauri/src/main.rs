@@ -4,7 +4,9 @@ mod database;
 mod graph;
 use axum::response::Html;
 use axum::{extract::Query, routing::get, Extension, Router};
+use database::User;
 use oauth2::basic::BasicClient;
+use oauth2::TokenResponse;
 use oauth2::{
     reqwest::Error, AuthUrl, AuthorizationCode, ClientId, CsrfToken, HttpRequest, HttpResponse,
     PkceCodeChallenge, PkceCodeVerifier, RedirectUrl, Scope, TokenUrl,
@@ -13,6 +15,7 @@ use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tauri::Manager;
+
 #[derive(Clone)]
 struct AuthState {
     csrf_token: CsrfToken,
@@ -23,6 +26,7 @@ struct AuthState {
 
 #[tauri::command]
 async fn authenticate(handle: tauri::AppHandle) -> bool {
+    println!("Authenticating");
     let auth = handle.state::<AuthState>();
     let (auth_url, _) = auth
         .client
@@ -34,9 +38,49 @@ async fn authenticate(handle: tauri::AppHandle) -> bool {
     println!("Opening {}", auth_url);
     open::that(auth_url.to_string()).unwrap();
     println!("Done");
-    false
+    true
 }
 
+#[tauri::command]
+async fn refresh(handle: tauri::AppHandle) -> bool {
+    let user = get_latest_token().await;
+    if user.is_none() {
+        return false;
+    }
+    let user = user.unwrap();
+    let refresh_token = user.token.refresh_token().unwrap();
+    let auth = handle.state::<AuthState>();
+    let token = auth
+        .client
+        .exchange_refresh_token(&refresh_token)
+        .request_async(local_async_http_client)
+        .await;
+    if token.is_err() {
+        println!("Error: {}", token.unwrap_err());
+        return false;
+    }
+    let token = token.unwrap();
+    let refresh_state = database::save_token(token, user.name).await;
+    if refresh_state.is_err() {
+        return false;
+    }
+    true
+}
+
+#[tauri::command]
+async fn get_latest_token() -> Option<User> {
+    let user = database::get_last_user().await;
+    if user.is_err() {
+        println!("Error: {}", user.unwrap_err());
+        return None;
+    }
+    let user = user.unwrap();
+    if user.is_none() {
+        println!("Error: No user found {:?}", user);
+        return None;
+    }
+    Some(user.unwrap())
+}
 fn main() -> surrealdb::Result<()> {
     let port = 9197;
     let (pkce_code_challenge, pkce_code_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -54,7 +98,11 @@ fn main() -> surrealdb::Result<()> {
 
     tauri::Builder::default()
         .manage(state)
-        .invoke_handler(tauri::generate_handler![authenticate])
+        .invoke_handler(tauri::generate_handler![
+            get_latest_token,
+            authenticate,
+            refresh
+        ])
         .setup(|app| {
             let handle = app.handle();
             tauri::async_runtime::spawn(async move {
@@ -98,6 +146,7 @@ async fn authorize(
         return Html(include_str!("../error.html"));
     }
     let oauth_http_client = local_async_http_client;
+
     let token = auth
         .client
         .exchange_code(query.code.clone())
@@ -111,7 +160,6 @@ async fn authorize(
     }
 
     let token = token.unwrap();
-
     let client = graph::GraphClient::new(token.clone());
     let user_details = client.get_user().await.unwrap();
 

@@ -9,8 +9,9 @@ use tauri::AppHandle;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct User {
-    token: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-    name: String,
+    pub token: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
+    pub name: String,
+    pub login_date: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,11 +35,28 @@ pub async fn initialize_database(app_handle: &AppHandle) -> surrealdb::Result<()
     Ok(())
 }
 
+pub async fn get_last_user() -> Result<Option<User>, Box<dyn std::error::Error>> {
+    let mut result = DB
+        .query("SELECT * FROM user ORDER BY login_date DESC LIMIT 1")
+        .await?;
+    Ok(result.take(0)?)
+}
+
 pub async fn save_token(
     token: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
     name: String,
-) -> Result<Vec<Record>, Box<dyn std::error::Error>> {
-    Ok(DB.create("user").content(User { token, name }).await?)
+) -> Result<Option<Record>, Box<dyn std::error::Error>> {
+    Ok(DB
+        .update(("user", &name))
+        .content(User {
+            token,
+            name,
+            login_date: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        })
+        .await?)
 }
 
 // pub async fn delete_token(
