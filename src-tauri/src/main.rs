@@ -42,12 +42,12 @@ async fn authenticate(handle: tauri::AppHandle) -> bool {
 }
 
 #[tauri::command]
-async fn refresh(handle: tauri::AppHandle) -> bool {
+async fn refresh(handle: tauri::AppHandle) -> Option<User> {
     let user = get_latest_token().await;
     if user.is_none() {
-        return false;
+        return None;
     }
-    let user = user.unwrap();
+    let mut user = user.unwrap();
     let refresh_token = user.token.refresh_token().unwrap();
     let auth = handle.state::<AuthState>();
     let token = auth
@@ -57,14 +57,15 @@ async fn refresh(handle: tauri::AppHandle) -> bool {
         .await;
     if token.is_err() {
         println!("Error: {}", token.unwrap_err());
-        return false;
+        return None;
     }
     let token = token.unwrap();
-    let refresh_state = database::save_token(token, user.name).await;
+    user.token = token.clone();
+    let refresh_state = database::save_token(token, &user.name).await;
     if refresh_state.is_err() {
-        return false;
+        return None;
     }
-    true
+    Some(user)
 }
 
 #[tauri::command]
@@ -163,7 +164,7 @@ async fn authorize(
     let client = graph::GraphClient::new(token.clone());
     let user_details = client.get_user().await.unwrap();
 
-    let resp = database::save_token(token, user_details.user_principal_name).await;
+    let resp = database::save_token(token, &user_details.user_principal_name).await;
     println!("{:?}", resp);
     Html(&include_str!("../redirect.html"))
 }

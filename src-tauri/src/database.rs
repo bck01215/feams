@@ -44,13 +44,13 @@ pub async fn get_last_user() -> Result<Option<User>, Box<dyn std::error::Error>>
 
 pub async fn save_token(
     token: StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-    name: String,
+    name: &str,
 ) -> Result<Option<Record>, Box<dyn std::error::Error>> {
     Ok(DB
-        .update(("user", &name))
+        .update(("user", name))
         .content(User {
             token,
-            name,
+            name: name.to_string(),
             login_date: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
